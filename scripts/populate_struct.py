@@ -103,7 +103,7 @@ Automatically populate struct fields
                 if insn:
                     for op in insn.ops:
                         if op.type == idaapi.o_displ:
-                            idau.insn_op_stroff(insn, op.n, sid, delta)
+                            idc.op_stroff(insn, op.n, sid, delta)
 
     # All done! :)
     print('Done')

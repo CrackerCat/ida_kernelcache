@@ -7,20 +7,18 @@
 
 from collections import deque
 
-import os
 import sys
-import pathlib
 import idc
 import idautils
 import idaapi
-import ida_struct
 import ida_bytes
 import ida_funcs
 import ida_name
 import ida_auto
 import ida_typeinf
+import ida_ida
 
-read_ptr = idaapi.get_qword if idaapi.get_inf_structure().is_64bit() else idaapi.get_dword
+read_ptr = idaapi.get_qword if ida_ida.inf_is_64bit() else idaapi.get_dword
 
 def make_log(log_level, module):
     """Create a logging function."""
@@ -46,17 +44,13 @@ LITTLE_ENDIAN = True
 def _initialize():
     # https://reverseengineering.stackexchange.com/questions/11396/how-to-get-the-cpu-architecture-via-idapython
     global WORD_SIZE, LITTLE_ENDIAN, BIG_ENDIAN
-    info = idaapi.get_inf_structure()
-    if info.is_64bit():
+    if ida_ida.inf_is_64bit():
         WORD_SIZE = 8
-    elif info.is_32bit():
+    elif ida_ida.inf_is_32bit_exactly():
         WORD_SIZE = 4
     else:
         WORD_SIZE = 2
-    try:
-        BIG_ENDIAN = info.is_be()
-    except:
-        BIG_ENDIAN = info.mf
+    BIG_ENDIAN = ida_ida.inf_is_be()
     LITTLE_ENDIAN = not BIG_ENDIAN
 
 _initialize()
@@ -168,18 +162,6 @@ def set_ea_name(ea, name, rename=False, auto=False):
         flags |= idc.SN_AUTO
     return bool(idc.set_name(ea, name, flags))
 
-def _insn_op_stroff_700(insn, n, sid, delta):
-    """A wrapper of idc.op_stroff for IDA 7."""
-    return idc.op_stroff(insn, n, sid, delta)
-
-def _insn_op_stroff_695(insn, n, sid, delta):
-    """A wrapper of idc.op_stroff for IDA 6.95."""
-    return idc.op_stroff(insn.ea, n, sid, delta)
-
-if idaapi.IDA_SDK_VERSION < 700:
-    insn_op_stroff = _insn_op_stroff_695
-else:
-    insn_op_stroff = _insn_op_stroff_700
 
 def _addresses(start, end, step, partial, aligned):
     """A generator to iterate over the addresses in an address range."""
@@ -375,9 +357,9 @@ def _read_struct_member_once(ea, flags, size, member_sid, member_size, asobject)
     elif ida_bytes.is_strlit(flags):
         return idc.get_bytes(ea, size), size
     elif ida_bytes.is_float(flags):
-        return idc.Float(ea), 4
+        return idc.GetFloat(ea), 4
     elif ida_bytes.is_double(flags):
-        return idc.Double(ea), 8
+        return idc.GetDouble(ea), 8
     elif ida_bytes.is_struct(flags):
         value = read_struct(ea, sid=member_sid, asobject=asobject)
         return value, member_size
@@ -385,13 +367,17 @@ def _read_struct_member_once(ea, flags, size, member_sid, member_size, asobject)
 
 def _read_struct_member(struct, sid, union, ea, offset, name, size, asobject):
     """Read a member into a struct for read_struct."""
-    flags = idc.get_member_flag(sid, offset)
+    tif = ida_typeinf.tinfo_t()
+    if not tif.get_type_by_tid(sid):
+        raise ValueError('get_type_by_tid failed for sid {}'.format(sid))
+    _, udm = tif.get_udm_by_offset(offset*8) # in bits
+    _, _, flags, _, _ = ida_typeinf.get_idainfo_by_type(udm.type)
     assert flags != -1
     # Extra information for parsing a struct.
     member_sid, member_ssize = None, None
     if ida_bytes.is_struct(flags):
         member_sid = idc.get_member_strid(sid, offset)
-        member_ssize = ida_struct.get_struc_size(member_sid)
+        member_ssize = idc.get_struc_size(member_sid)
     # Get the address of the start of the member.
     member = ea
     if not union:
@@ -431,7 +417,7 @@ def read_struct(ea, struct=None, sid=None, members=None, asobject=False):
     """
     # Handle sid/struct.
     if struct is not None:
-        sid2 = ida_struct.get_struc_id(struct)
+        sid2 = idc.get_struc_id(struct)
         if sid2 == idc.BADADDR:
             raise ValueError('Invalid struc name {}'.format(struct))
         if sid is not None and sid2 != sid:
@@ -440,7 +426,7 @@ def read_struct(ea, struct=None, sid=None, members=None, asobject=False):
     else:
         if sid is None:
             raise ValueError('Invalid arguments: sid={}, struct={}'.format(sid, struct))
-        if ida_struct.get_struc_name(sid) is None:
+        if not idc.get_struc_name(sid):
             raise ValueError('Invalid struc id {}'.format(sid))
     # Iterate through the members and add them to the struct.
     union = idc.is_union(sid)
@@ -450,7 +436,7 @@ def read_struct(ea, struct=None, sid=None, members=None, asobject=False):
             continue
         _read_struct_member(struct, sid, union, ea, offset, name, size, asobject)
     if asobject:
-        struct = objectview(struct, ea, ida_struct.get_struc_size(sid))
+        struct = objectview(struct, ea, idc.get_struc_size(sid))
     return struct
 
 def null_terminated(string):
@@ -474,7 +460,7 @@ def _fix_unrecognized_function_insns(func):
         if idc.create_insn(unrecognized_insn) == 0:
             _log(1, "Could not convert data at {:#x} to instruction", unrecognized_insn)
             return False
-        
+
     return True
 
 def _convert_address_to_function(func):
@@ -482,7 +468,7 @@ def _convert_address_to_function(func):
     # If everything goes wrong, we'll try to restore this function.
     orig = idc.first_func_chunk(func)
     if idc.find_func_end(func) == idc.BADADDR:
-        # Could not find function end, probably because IDA parsed an instruction 
+        # Could not find function end, probably because IDA parsed an instruction
         # in the middle of the function incorrectly as data. Lets try to fix the relevant insns.
         _fix_unrecognized_function_insns(func)
 
@@ -589,7 +575,7 @@ def struct_create(name, union=False):
             tif.create_udt(udt)
             # replace old ordinal with new struct:
             tif.set_numbered_type(til, ordinal, ida_typeinf.NTF_REPLACE, name)
-            sid = ida_struct.get_struc_id(name)
+            sid = idc.get_struc_id(name)
         else:
             # type exists but is not a forward decl?
             return None
@@ -599,8 +585,8 @@ def struct_create(name, union=False):
 
 def struct_open(name, create=False, union=None):
     """Get the SID of the IDA struct with the given name, optionally creating it."""
-    sid = ida_struct.get_struc_id(name)
-    if sid == idc.BADADDR:
+    sid = idc.get_struc_id(name)
+    if sid in (-1, idc.BADADDR):
         if not create:
             return None
         sid = struct_create(name, union=bool(union))
@@ -612,13 +598,10 @@ def struct_open(name, create=False, union=None):
 
 def struct_member_offset(sid, name):
     """A version of IDA's GetMemberOffset() that also works with unions."""
-    struct = idaapi.get_struc(sid)
-    if not struct:
+    offset = idc.get_member_offset(sid, name)
+    if offset == -1:
         return None
-    member = idaapi.get_member_by_name(struct, name)
-    if not member:
-        return None
-    return member.soff
+    return offset
 
 def struct_add_word(sid, name, offset, size, count=1):
     """Add a word (integer) to a structure.
@@ -647,16 +630,14 @@ def struct_add_struct(sid, name, offset, msid, count=1):
 
     If sid is a union, offset must be -1.
     """
-    size = ida_struct.get_struc_size(msid)
+    size = idc.get_struc_size(msid)
     return idc.add_struc_member(sid, name, offset, idc.FF_DATA | ida_bytes.FF_STRUCT, msid, size * count)
 
 def remove_typelibs():
-    """Iterate over all .til files amd attempt to remove them
-    """
-    til_dir = pathlib.Path(sys.executable).parent / "til"
-    for root, dirs, files in os.walk(til_dir):
-        for file in files:
-            if file.endswith(".til"):
-                til = os.path.splitext(file)[0]
-                ida_typeinf.del_til(til)
-    
+    """Remove all base type libraries attached to the IDB."""
+    til = ida_typeinf.get_idati()
+    # Detach bases in reverse order (removal shifts indices).
+    for i in range(til.nbases - 1, -1, -1):
+        base = til.base(i)
+        if base:
+            ida_typeinf.del_til(base.name)

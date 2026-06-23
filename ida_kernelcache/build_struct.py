@@ -9,8 +9,8 @@ import collections
 
 import idc
 import idautils
-import ida_struct
 import idaapi
+import ida_typeinf
 
 from . import ida_utilities as idau
 
@@ -45,7 +45,7 @@ def create_struct_fields(sid=None, name=None, accesses=None, create=False, base=
             _log(0, 'Could not open struct {}', name)
             return False
     else:
-        name = ida_struct.get_struc_name(sid)
+        name = idc.get_struc_name(sid)
         if name is None:
             _log(0, 'Invalid struct id {}', sid)
             return False
@@ -63,11 +63,10 @@ def create_struct_fields(sid=None, name=None, accesses=None, create=False, base=
         member = field_name(offset)
         ret = idau.struct_add_word(sid, member, offset - base, size)
         if ret != 0:
-            if ret == idc.STRUC_ERROR_MEMBER_OFFSET:
+            if ret == ida_typeinf.TERR_OVERLAP:
                 _log(2, 'Could not add {}.{} for access ({}, {})', name, member, offset, size)
             else:
                 success = False
                 _log(1, 'Could not add {}.{} for access ({}, {}): {}', name, member, offset, size,
                         ret)
     return success
-
